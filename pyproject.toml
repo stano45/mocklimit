@@ -42,7 +42,7 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["ALL"]
-
+ignore = ["D203", "D213"]
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
