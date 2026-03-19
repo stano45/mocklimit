@@ -1,7 +1,7 @@
 [project]
 name = "mocklimit"
 version = "0.1.0"
-description = "Add your description here"
+description = "Configurable mock API server with realistic rate limiting for testing"
 readme = "README.md"
 authors = [
     { name = "Stanislav Kosorin", email = "stanokosorin4@gmail.com" }
@@ -9,7 +9,21 @@ authors = [
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["mock", "rate-limiting", "api", "testing", "openapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/stankosorin/mocklimit"
+Documentation = "https://github.com/stankosorin/mocklimit#readme"
 
 [build-system]
 requires = ["uv_build>=0.8.23,<0.9.0"]
