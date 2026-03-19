@@ -24,10 +24,10 @@ class FixedWindowLimiter:
         self._window_seconds = window_seconds
         self._windows: dict[str, dict[int, int]] = {}
 
-    def check(self, key: str, cost: int = 1) -> LimitResult:
-        """Check whether *key* may consume *cost* units of the budget.
+    def _get_window_state(self, key: str) -> tuple[int, int, float]:
+        """Return ``(current_window, current_count, reset_after)`` for *key*.
 
-        Returns a `LimitResult` describing the decision and timing metadata.
+        Cleans up stale windows as a side-effect.
         """
         now = time.time()
         current_window = int(now // self._window_seconds)
@@ -44,6 +44,35 @@ class FixedWindowLimiter:
                 del key_windows[w]
 
         current_count = key_windows.get(current_window, 0)
+        return current_window, current_count, reset_after
+
+    def peek(self, key: str, cost: int = 1) -> LimitResult:
+        """Return what `check` would return without consuming budget."""
+        _, current_count, reset_after = self._get_window_state(key)
+
+        if current_count + cost > self._max_requests:
+            return LimitResult(
+                allowed=False,
+                remaining=self._max_requests - current_count,
+                limit=self._max_requests,
+                reset_after_seconds=reset_after,
+                retry_after_seconds=reset_after,
+            )
+
+        return LimitResult(
+            allowed=True,
+            remaining=self._max_requests - (current_count + cost),
+            limit=self._max_requests,
+            reset_after_seconds=reset_after,
+            retry_after_seconds=0.0,
+        )
+
+    def check(self, key: str, cost: int = 1) -> LimitResult:
+        """Check whether *key* may consume *cost* units of the budget.
+
+        Returns a `LimitResult` describing the decision and timing metadata.
+        """
+        current_window, current_count, reset_after = self._get_window_state(key)
 
         if current_count + cost > self._max_requests:
             return LimitResult(
@@ -55,7 +84,7 @@ class FixedWindowLimiter:
             )
 
         new_count = current_count + cost
-        key_windows[current_window] = new_count
+        self._windows[key][current_window] = new_count
 
         return LimitResult(
             allowed=True,
