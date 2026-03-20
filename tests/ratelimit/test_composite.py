@@ -79,35 +79,34 @@ class TestAtomicConcurrency:
 
     def test_no_overconsumption_under_contention(self) -> None:
         """Fire 20 threads at RPM=10; exactly 10 succeed, counter never overflows."""
-        rpm = FixedWindowLimiter(max_requests=10, window_seconds=60.0)
-        tpm = FixedWindowLimiter(max_requests=10000, window_seconds=60.0)
-        composite = CompositeLimit([("rpm", rpm), ("tpm", tpm)])
-
-        num_threads = 20
-        barrier = threading.Barrier(num_threads)
-        results: list[bool] = []
-        results_lock = threading.Lock()
-
-        def worker() -> None:
-            barrier.wait()
-            with patch("time.time", return_value=1000.0):
-                r = composite.check("user-1", costs={"rpm": 1, "tpm": 1})
-            with results_lock:
-                results.append(r.allowed)
-
-        threads = [threading.Thread(target=worker) for _ in range(num_threads)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        allowed_count = sum(results)
-        denied_count = len(results) - allowed_count
-
-        assert allowed_count == 10
-        assert denied_count == 10
-
         with patch("time.time", return_value=1000.0):
+            rpm = FixedWindowLimiter(max_requests=10, window_seconds=60.0)
+            tpm = FixedWindowLimiter(max_requests=10000, window_seconds=60.0)
+            composite = CompositeLimit([("rpm", rpm), ("tpm", tpm)])
+
+            num_threads = 20
+            barrier = threading.Barrier(num_threads)
+            results: list[bool] = []
+            results_lock = threading.Lock()
+
+            def worker() -> None:
+                barrier.wait()
+                r = composite.check("user-1", costs={"rpm": 1, "tpm": 1})
+                with results_lock:
+                    results.append(r.allowed)
+
+            threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            allowed_count = sum(results)
+            denied_count = len(results) - allowed_count
+
+            assert allowed_count == 10
+            assert denied_count == 10
+
             rpm_state = rpm.peek("user-1", cost=0)
 
         assert rpm_state.remaining == 0
