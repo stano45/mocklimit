@@ -119,6 +119,7 @@ components:
           type: string
         object:
           type: string
+          enum: ["chat.completion"]
         created:
           type: integer
         model:
@@ -127,6 +128,27 @@ components:
           type: array
           items:
             type: object
+            properties:
+              finish_reason:
+                type: string
+                enum: ["stop"]
+              index:
+                type: integer
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                    enum: ["assistant"]
+                  content:
+                    type: string
+                required:
+                  - role
+                  - content
+            required:
+              - finish_reason
+              - index
+              - message
         usage:
           type: object
           properties:
