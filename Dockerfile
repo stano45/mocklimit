@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 
 EXPOSE 8000
 
+ENV PYTHONUNBUFFERED=1
 ENV MOCKLIMIT_LOG_LEVEL=INFO
 
 ENTRYPOINT ["mocklimit"]
