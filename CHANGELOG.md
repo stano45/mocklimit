@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 (2026-03-21)
+
+- Switched all logging to loguru with configurable log levels
+- Added `configure_logging()` public API for library consumers
+- CLI: `--log-level`, `--log-format`, `--log-json` flags
+- Docker: `MOCKLIMIT_LOG_LEVEL` environment variable
+- Comprehensive TRACE/DEBUG/INFO/WARNING/ERROR logging across all modules
+
 ## 0.1.0 (2026-03-20)
 
 Initial release.

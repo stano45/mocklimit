@@ -5,6 +5,6 @@ from loguru import logger
 from .logging import configure_logging
 
 __all__ = ["configure_logging"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 logger.disable("mocklimit")
