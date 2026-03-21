@@ -30,3 +30,8 @@ jobs:
 
       - name: Publish
         run: uv publish
+
+  docker:
+    needs: [ci, publish]
+    uses: ./.github/workflows/docker.yml
+    secrets: inherit
