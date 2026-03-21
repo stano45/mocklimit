@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
+from loguru import logger
 
 __all__ = ["generate_all_responses", "generate_dummy_response"]
 
@@ -34,6 +35,7 @@ def _resolve_ref(ref: str, all_schemas: dict[str, Any]) -> dict[str, Any]:
     """Resolve a ``$ref`` string like ``#/components/schemas/Foo``."""
     name = ref.rsplit("/", maxsplit=1)[-1]
     schema = all_schemas.get(name)
+    logger.trace("Resolving $ref '{}' -> schema '{}'", ref, name)
     if isinstance(schema, dict):
         return cast("dict[str, Any]", schema)
     return {}
@@ -96,6 +98,11 @@ def _generate_object(
     result: dict[str, Any] = {}
 
     keys = [k for k in properties if k in required] if required else list(properties)
+    logger.trace(
+        "Generating object with {} properties (required={})",
+        len(keys),
+        required is not None,
+    )
     for key in keys:
         prop_schema = properties[key]
         if isinstance(prop_schema, dict):
@@ -163,6 +170,7 @@ def generate_all_responses(spec_path: str) -> dict[str, dict[str, Any]]:
     Returns a mapping of ``"METHOD /path"`` to a generated response dict.
     ``$ref`` values are resolved against the spec's ``components/schemas``.
     """
+    logger.debug("Generating dummy responses from spec '{}'", spec_path)
     raw = Path(spec_path).read_text(encoding="utf-8")
     spec: dict[str, Any] = yaml.safe_load(raw)
 
@@ -175,6 +183,7 @@ def generate_all_responses(spec_path: str) -> dict[str, dict[str, Any]]:
 
     paths: dict[str, Any] | None = _as_str_dict(spec.get("paths"))
     if not paths:
+        logger.warning("No paths in spec '{}', returning empty responses", spec_path)
         return {}
 
     result: dict[str, dict[str, Any]] = {}
@@ -192,5 +201,11 @@ def generate_all_responses(spec_path: str) -> dict[str, dict[str, Any]]:
             if response_schema:
                 key = f"{method.upper()} {route_path}"
                 result[key] = generate_dummy_response(response_schema, all_schemas)
+                logger.debug("Generated dummy response for {}", key)
 
+    logger.info(
+        "Generated dummy responses for {} routes from '{}'",
+        len(result),
+        spec_path,
+    )
     return result

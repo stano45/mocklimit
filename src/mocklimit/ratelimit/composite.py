@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from .models import CompositeLimitResult, LimitResult
 
 if TYPE_CHECKING:
@@ -35,6 +37,7 @@ class CompositeLimit:
             if lock is None:
                 lock = threading.Lock()
                 self._locks[key] = lock
+                logger.trace("Created new per-key lock for '{}'", key)
             return lock
 
     def check(self, key: str, costs: dict[str, int]) -> CompositeLimitResult:
@@ -50,10 +53,22 @@ class CompositeLimit:
             for name, limiter in self._limiters:
                 result = limiter.peek(key, costs[name])
                 per_limit[name] = result
+                logger.trace(
+                    "Composite peek [key={}, limiter={}]: allowed={} remaining={}",
+                    key,
+                    name,
+                    result.allowed,
+                    result.remaining,
+                )
                 if not result.allowed and denied_by is None:
                     denied_by = name
 
             if denied_by is not None:
+                logger.debug(
+                    "Composite DENIED [key={}]: denied_by='{}'",
+                    key,
+                    denied_by,
+                )
                 return CompositeLimitResult(
                     allowed=False,
                     denied_by=denied_by,
@@ -64,6 +79,7 @@ class CompositeLimit:
                 result = limiter.check(key, costs[name])
                 per_limit[name] = result
 
+            logger.debug("Composite ALLOWED [key={}]", key)
             return CompositeLimitResult(
                 allowed=True,
                 denied_by=None,

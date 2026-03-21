@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import jsonref
 import yaml
+from loguru import logger
 
 from .models import RouteDefinition
 
@@ -57,32 +58,55 @@ def parse_spec(path: str) -> list[RouteDefinition]:
     from the first 2xx response with ``application/json`` content.  Missing
     responses or schemas are represented as empty dicts.
     """
+    logger.debug("Parsing OpenAPI spec from '{}'", path)
     raw = Path(path).read_text(encoding="utf-8")
     spec: dict[str, Any] = jsonref.replace_refs(yaml.safe_load(raw))
 
     paths: dict[str, Any] | None = spec.get("paths")
     if not paths:
+        logger.warning("No paths found in OpenAPI spec '{}'", path)
         return []
 
     routes: list[RouteDefinition] = []
     for route_path, path_item_raw in paths.items():
         path_item = _as_str_dict(path_item_raw)
         if path_item is None:
+            logger.warning("Path item for '{}' is not a dict, skipping", route_path)
             continue
         for method, operation_raw in path_item.items():
             if method not in _HTTP_METHODS:
                 continue
             operation = _as_str_dict(operation_raw)
             if operation is None:
+                logger.warning(
+                    "Operation {} {} is not a dict, skipping",
+                    method.upper(),
+                    route_path,
+                )
                 continue
             op_id: str | None = operation.get("operationId")
+            schema = _extract_response_schema(operation)
+            if not schema:
+                logger.debug(
+                    "No response schema for {} {} (operationId={})",
+                    method.upper(),
+                    route_path,
+                    op_id,
+                )
             routes.append(
                 RouteDefinition(
                     path=route_path,
                     method=method.upper(),
-                    response_schema=_extract_response_schema(operation),
+                    response_schema=schema,
                     operation_id=op_id,
                 ),
             )
+            logger.debug(
+                "Parsed route: {} {} (operationId={})",
+                method.upper(),
+                route_path,
+                op_id,
+            )
 
+    logger.info("Parsed OpenAPI spec: {} routes from '{}'", len(routes), path)
     return routes

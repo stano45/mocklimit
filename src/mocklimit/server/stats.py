@@ -6,6 +6,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+
 __all__ = ["StatsTracker"]
 
 
@@ -31,16 +33,34 @@ class StatsTracker:
     def record_request(self, endpoint: str, key: str) -> None:
         """Increment the total-requests counter for *endpoint* / *key*."""
         with self._lock:
-            self._ensure(endpoint, key).total_requests += 1
+            stats = self._ensure(endpoint, key)
+            stats.total_requests += 1
+            logger.trace(
+                "Stats: request recorded for {} [key={}] (total={})",
+                endpoint,
+                key,
+                stats.total_requests,
+            )
 
     def record_limited(self, endpoint: str, key: str) -> None:
         """Increment the total-429s counter for *endpoint* / *key*."""
         with self._lock:
-            self._ensure(endpoint, key).total_429s += 1
+            stats = self._ensure(endpoint, key)
+            stats.total_429s += 1
+            logger.trace(
+                "Stats: 429 recorded for {} [key={}] (total_429s={})",
+                endpoint,
+                key,
+                stats.total_429s,
+            )
 
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-serializable copy of current statistics."""
         with self._lock:
+            logger.trace(
+                "Stats: snapshot requested ({} endpoints tracked)",
+                len(self._data),
+            )
             return {
                 endpoint: {
                     key: {

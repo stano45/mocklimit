@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 
+from loguru import logger
+
 from .fixed_window import FixedWindowLimiter
 from .models import LimitResult
 
@@ -36,6 +38,13 @@ class QuantizedLimiter:
         self._inner = FixedWindowLimiter(inner_max_requests, inner_window_seconds)
         self._lock_map_lock = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
+        logger.trace(
+            "QuantizedLimiter created: outer={}/{:.0f}s inner={}/{:.0f}s",
+            outer_max_requests,
+            outer_window_seconds,
+            inner_max_requests,
+            inner_window_seconds,
+        )
 
     def _get_lock(self, key: str) -> threading.Lock:
         """Return the per-key lock, creating it if necessary."""
@@ -89,10 +98,36 @@ class QuantizedLimiter:
             outer_peek = self._outer.peek(key, cost)
             inner_peek = self._inner.peek(key, cost)
 
+            logger.trace(
+                "Quantized peek [key={}]: outer(allowed={}, remaining={})"
+                " inner(allowed={}, remaining={})",
+                key,
+                outer_peek.allowed,
+                outer_peek.remaining,
+                inner_peek.allowed,
+                inner_peek.remaining,
+            )
+
             if not outer_peek.allowed or not inner_peek.allowed:
-                return self._pick_denial(outer_peek, inner_peek)
+                denial = self._pick_denial(outer_peek, inner_peek)
+                logger.debug(
+                    "Quantized DENIED [key={}]: outer_allowed={}"
+                    " inner_allowed={} retry_after={:.2f}s",
+                    key,
+                    outer_peek.allowed,
+                    inner_peek.allowed,
+                    denial.retry_after_seconds,
+                )
+                return denial
 
             outer_result = self._outer.check(key, cost)
             inner_result = self._inner.check(key, cost)
 
-            return self._merge_allowed(outer_result, inner_result)
+            merged = self._merge_allowed(outer_result, inner_result)
+            logger.debug(
+                "Quantized ALLOWED [key={}]: remaining={} reset_after={:.2f}s",
+                key,
+                merged.remaining,
+                merged.reset_after_seconds,
+            )
+            return merged

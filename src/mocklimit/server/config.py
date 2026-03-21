@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel
+from loguru import logger
+from pydantic import BaseModel, ValidationError
 
 __all__ = ["EndpointConfig", "RateLimitConfig", "load_config"]
 
@@ -60,6 +61,39 @@ class RateLimitConfig(BaseModel):
 
 def load_config(path: str) -> RateLimitConfig:
     """Read a YAML config file and return a validated ``RateLimitConfig``."""
+    logger.debug("Loading rate-limit config from '{}'", path)
     raw = Path(path).read_text(encoding="utf-8")
     data: dict[str, Any] = yaml.safe_load(raw)
-    return RateLimitConfig.model_validate(data)
+
+    try:
+        config = RateLimitConfig.model_validate(data)
+    except ValidationError:
+        logger.error("Rate-limit config validation failed for '{}'", path)
+        raise
+
+    for name, policy in config.policies.items():
+        logger.debug(
+            "Policy '{}': strategy={}, {} limit(s), scope={}, latency={}-{}ms",
+            name,
+            policy.strategy,
+            len(policy.limits),
+            policy.scope,
+            policy.response_latency_ms[0],
+            policy.response_latency_ms[1],
+        )
+
+    for ep_path, ep_cfg in config.endpoints.items():
+        logger.debug(
+            "Endpoint '{}': methods={}, policy='{}'{}",
+            ep_path,
+            ep_cfg.methods,
+            ep_cfg.policy,
+            ", token_estimation=enabled" if ep_cfg.token_estimation else "",
+        )
+
+    logger.info(
+        "Rate-limit config loaded: {} policies, {} endpoints",
+        len(config.policies),
+        len(config.endpoints),
+    )
+    return config
