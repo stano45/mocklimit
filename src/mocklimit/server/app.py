@@ -25,6 +25,7 @@ from mocklimit.ratelimit import (
 )
 
 from .config import EndpointConfig, PolicyConfig, RateLimitConfig, load_config
+from .metrics import MetricsTracker
 from .stats import StatsTracker
 
 __all__ = ["create_app"]
@@ -44,6 +45,7 @@ class _RouteContext:
     limiter: CompositeLimit
     costs: dict[str, int]
     stats: StatsTracker
+    metrics: MetricsTracker
 
 
 def _extract_scope_key(request: Request, policy: PolicyConfig) -> str:
@@ -202,6 +204,7 @@ def create_app(spec_path: str, rate_config_path: str) -> FastAPI:
     config = load_config(rate_config_path)
     limiters = _build_limiters(config)
     stats = StatsTracker()
+    metrics = MetricsTracker()
     route_table = _build_route_table(routes, config)
     base_path = _extract_base_path(spec_path)
 
@@ -226,6 +229,7 @@ def create_app(spec_path: str, rate_config_path: str) -> FastAPI:
                 limiter=limiters[ep_cfg.policy],
                 costs={f"limit_{i}": 1 for i in range(len(policy.limits))},
                 stats=stats,
+                metrics=metrics,
             )
             _register_limited_route(router, route, ctx)
             limited_count += 1
@@ -253,6 +257,7 @@ def create_app(spec_path: str, rate_config_path: str) -> FastAPI:
 
     app.add_api_route("/mocklimit/stats", get_stats, methods=["GET"])
     app.add_api_route("/mocklimit/routes", get_routes, methods=["GET"])
+    app.mount("/metrics", metrics.make_asgi_app())
 
     logger.info(
         "App ready: {} routes registered ({} rate-limited, {} plain) under '{}'",
@@ -283,14 +288,23 @@ def _register_limited_route(
 
         if not result.allowed:
             ctx.stats.record_limited(ctx.route_key, scope_key)
-            elapsed = (time.monotonic() - start) * 1000
+            duration = time.monotonic() - start
+            ctx.metrics.observe_request(
+                endpoint=ctx.route_key,
+                method=request.method,
+                scope_key=scope_key,
+                status=429,
+                duration_seconds=duration,
+                remaining=lr.remaining,
+                policy=ctx.ep_cfg.policy,
+            )
             logger.info(
                 "{} {} -> 429 (denied_by={}, remaining={}) [{:.1f}ms]",
                 request.method,
                 request.url.path,
                 result.denied_by,
                 lr.remaining,
-                elapsed,
+                duration * 1000,
             )
             return JSONResponse(
                 status_code=429,
@@ -313,13 +327,22 @@ def _register_limited_route(
         if usage:
             body["usage"] = usage
 
-        elapsed = (time.monotonic() - start) * 1000
+        duration = time.monotonic() - start
+        ctx.metrics.observe_request(
+            endpoint=ctx.route_key,
+            method=request.method,
+            scope_key=scope_key,
+            status=200,
+            duration_seconds=duration,
+            remaining=lr.remaining,
+            policy=ctx.ep_cfg.policy,
+        )
         logger.info(
             "{} {} -> 200 (remaining={}) [{:.1f}ms]",
             request.method,
             request.url.path,
             lr.remaining,
-            elapsed,
+            duration * 1000,
         )
         return JSONResponse(content=body, headers=headers)
 

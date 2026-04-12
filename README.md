@@ -21,6 +21,7 @@ correct headers, 429 responses, and token usage estimation.
 - **Configurable response latency** simulation
 - **Per-key scoping** by API key or IP address
 - **Request statistics** via `/mocklimit/stats`
+- **Prometheus metrics** at `/metrics` -- request counts, latency histograms, rate limit gauges
 
 ## Installation
 
@@ -110,6 +111,41 @@ Map API paths to policies:
 | `methods` | list of strings | HTTP methods to rate limit |
 | `policy` | string | Name of the policy to apply |
 | `token_estimation` | object (optional) | `{input: "characters_div_4", output: [min, max]}` |
+
+## Prometheus metrics
+
+mocklimit exposes a Prometheus-compatible scrape endpoint at `/metrics/`.
+
+### Exposed metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `mocklimit_requests_total` | Counter | `endpoint`, `method`, `scope_key`, `status` | Total requests to rate-limited endpoints |
+| `mocklimit_rate_limited_total` | Counter | `endpoint`, `method`, `scope_key` | Requests denied with 429 |
+| `mocklimit_request_duration_seconds` | Histogram | `endpoint`, `method`, `status` | Handler latency including simulated delay |
+| `mocklimit_rate_limit_remaining` | Gauge | `endpoint`, `policy`, `scope_key` | Remaining requests in the current window |
+
+### Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: mocklimit
+    metrics_path: /metrics/
+    static_configs:
+      - targets: ["localhost:8000"]
+```
+
+### Example output
+
+After a few requests:
+
+```
+mocklimit_requests_total{endpoint="POST /chat/completions",method="POST",scope_key="my-key",status="200"} 5.0
+mocklimit_requests_total{endpoint="POST /chat/completions",method="POST",scope_key="my-key",status="429"} 1.0
+mocklimit_rate_limited_total{endpoint="POST /chat/completions",method="POST",scope_key="my-key"} 1.0
+mocklimit_rate_limit_remaining{endpoint="POST /chat/completions",policy="chat",scope_key="my-key"} 0.0
+mocklimit_request_duration_seconds_count{endpoint="POST /chat/completions",method="POST",status="200"} 5.0
+```
 
 ## Programmatic usage
 
