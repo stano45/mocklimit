@@ -1,0 +1,113 @@
+openapi: "3.0.0"
+info:
+  title: Gemini 3.1 Pro (mock)
+  version: "1.0"
+servers:
+  - url: /v1beta
+paths:
+  /models/gemini-3.1-pro:generateContent:
+    post:
+      operationId: generateContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateContentRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateContentResponse"
+  /models:
+    get:
+      operationId: listModels
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [models]
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, displayName]
+                      properties:
+                        name:
+                          type: string
+                        displayName:
+                          type: string
+components:
+  schemas:
+    GenerateContentRequest:
+      type: object
+      required: [contents]
+      properties:
+        contents:
+          type: array
+          items:
+            type: object
+            required: [parts]
+            properties:
+              role:
+                type: string
+              parts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    text:
+                      type: string
+        generationConfig:
+          type: object
+          properties:
+            temperature:
+              type: number
+            topP:
+              type: number
+            topK:
+              type: integer
+            maxOutputTokens:
+              type: integer
+    GenerateContentResponse:
+      type: object
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [content, finishReason]
+            properties:
+              index:
+                type: integer
+              content:
+                type: object
+                required: [parts, role]
+                properties:
+                  role:
+                    type: string
+                  parts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        text:
+                          type: string
+              finishReason:
+                type: string
+        usageMetadata:
+          type: object
+          properties:
+            promptTokenCount:
+              type: integer
+            candidatesTokenCount:
+              type: integer
+            totalTokenCount:
+              type: integer

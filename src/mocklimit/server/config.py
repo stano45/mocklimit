@@ -30,7 +30,7 @@ class HeadersConfig(BaseModel):
 class PolicyConfig(BaseModel):
     """A named rate limiting policy."""
 
-    strategy: Literal["fixed_window"]
+    strategy: Literal["fixed_window", "sliding_window"]
     limits: list[LimitConfig]
     scope: Literal["api_key", "ip"]
     response_latency_ms: tuple[int, int]

@@ -1,4 +1,4 @@
-"""mocklimit — configurable mock API server with realistic rate limiting."""
+"""mocklimit - configurable mock API server with realistic rate limiting."""
 
 from loguru import logger
 

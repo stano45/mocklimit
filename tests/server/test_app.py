@@ -294,3 +294,92 @@ class TestOpenAISDKIntegration:
                 model="gpt-4",
                 messages=[{"role": "user", "content": "hi"}],
             )
+
+
+# ---------------------------------------------------------------------------
+# Sliding window integration tests
+# ---------------------------------------------------------------------------
+
+
+_GEMINI_BODY = {"contents": [{"parts": [{"text": "hi"}]}]}
+
+
+@pytest.fixture
+def sliding_window_client() -> TestClient:
+    """Return a ``TestClient`` wired with Gemini spec + sliding_window config."""
+    app = create_app(
+        spec_path=str(_OPENAPI_FIXTURES / "gemini_subset.yaml"),
+        rate_config_path=str(_FIXTURES / "sliding_window_config.yaml"),
+    )
+    return TestClient(app)
+
+
+class TestSlidingWindowAllowed:
+    """Requests under the sliding window limit return 200."""
+
+    def test_returns_200_with_headers(self, sliding_window_client: TestClient) -> None:
+        """A POST to the Gemini generateContent endpoint returns 200."""
+        resp = sliding_window_client.post(
+            "/v1beta/models/gemini-3.1-pro:generateContent",
+            json=_GEMINI_BODY,
+            headers=_auth_header("sw-key-a"),
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers.get("x-ratelimit-limit-requests") == "5"
+        assert "x-ratelimit-remaining-requests" in resp.headers
+
+
+class TestSlidingWindowDenied:
+    """Requests over the sliding window limit return 429."""
+
+    def test_returns_429_after_limit_exceeded(
+        self,
+        sliding_window_client: TestClient,
+    ) -> None:
+        """After 5 allowed requests the 6th gets 429."""
+        for _ in range(5):
+            sliding_window_client.post(
+                "/v1beta/models/gemini-3.1-pro:generateContent",
+                json=_GEMINI_BODY,
+                headers=_auth_header("sw-key-flood"),
+            )
+
+        resp = sliding_window_client.post(
+            "/v1beta/models/gemini-3.1-pro:generateContent",
+            json=_GEMINI_BODY,
+            headers=_auth_header("sw-key-flood"),
+        )
+
+        assert resp.status_code == 429
+        assert "retry-after" in resp.headers
+
+
+class TestSlidingWindowIndependentKeys:
+    """Different API keys maintain independent sliding window limits."""
+
+    def test_key_b_unaffected_by_key_a(
+        self,
+        sliding_window_client: TestClient,
+    ) -> None:
+        """Exhausting key-a does not block key-b."""
+        for _ in range(5):
+            sliding_window_client.post(
+                "/v1beta/models/gemini-3.1-pro:generateContent",
+                json=_GEMINI_BODY,
+                headers=_auth_header("sw-ind-a"),
+            )
+
+        denied = sliding_window_client.post(
+            "/v1beta/models/gemini-3.1-pro:generateContent",
+            json=_GEMINI_BODY,
+            headers=_auth_header("sw-ind-a"),
+        )
+        assert denied.status_code == 429
+
+        allowed = sliding_window_client.post(
+            "/v1beta/models/gemini-3.1-pro:generateContent",
+            json=_GEMINI_BODY,
+            headers=_auth_header("sw-ind-b"),
+        )
+        assert allowed.status_code == 200

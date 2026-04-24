@@ -10,7 +10,9 @@ from loguru import logger
 from .models import CompositeLimitResult, LimitResult
 
 if TYPE_CHECKING:
-    from .fixed_window import FixedWindowLimiter
+    from collections.abc import Sequence
+
+    from .models import Limiter
 
 __all__ = ["CompositeLimit"]
 
@@ -24,7 +26,7 @@ class CompositeLimit:
 
     __slots__ = ("_limiters", "_lock_map_lock", "_locks")
 
-    def __init__(self, limiters: list[tuple[str, FixedWindowLimiter]]) -> None:
+    def __init__(self, limiters: Sequence[tuple[str, Limiter]]) -> None:
         """Create a composite from *limiters* ``(name, limiter)`` pairs."""
         self._limiters = limiters
         self._lock_map_lock = threading.Lock()

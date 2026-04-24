@@ -22,6 +22,7 @@ from mocklimit.ratelimit import (
     CompositeLimitResult,
     FixedWindowLimiter,
     LimitResult,
+    SlidingWindowLimiter,
 )
 
 from .config import EndpointConfig, PolicyConfig, RateLimitConfig, load_config
@@ -103,10 +104,14 @@ def _build_limiters(config: RateLimitConfig) -> dict[str, CompositeLimit]:
     """Instantiate a ``CompositeLimit`` for every policy in *config*."""
     limiters: dict[str, CompositeLimit] = {}
     for name, policy in config.policies.items():
-        pairs: list[tuple[str, FixedWindowLimiter]] = [
+        if policy.strategy == "sliding_window":
+            limiter_cls = SlidingWindowLimiter
+        else:
+            limiter_cls = FixedWindowLimiter
+        pairs = [
             (
                 f"limit_{i}",
-                FixedWindowLimiter(
+                limiter_cls(
                     max_requests=lc.max_requests,
                     window_seconds=lc.window_seconds,
                 ),
@@ -115,8 +120,9 @@ def _build_limiters(config: RateLimitConfig) -> dict[str, CompositeLimit]:
         ]
         limiters[name] = CompositeLimit(pairs)
         logger.debug(
-            "Built limiter for policy '{}': {} limit(s), scope={}",
+            "Built limiter for policy '{}': strategy={}, {} limit(s), scope={}",
             name,
+            policy.strategy,
             len(policy.limits),
             policy.scope,
         )
