@@ -1,21 +1,24 @@
+# Test config: RPM-only enforcement — high TPM so it never fires.
+# 5 requests per 10s, 100000 tokens per 10s.
 policies:
-  openai_chat:
+  chat:
     strategy: fixed_window
     limits:
       - dimension: requests
         limit: 5
-        window_seconds: 60
+        window_seconds: 10
+      - dimension: tokens
+        limit: 100000
+        window_seconds: 10
     scope: api_key
-    response_latency_ms: [0, 0]
     headers:
       limit: x-ratelimit-limit-requests
       remaining: x-ratelimit-remaining-requests
       reset: x-ratelimit-reset-requests
-
 endpoints:
   /chat/completions:
     methods: [POST]
-    policy: openai_chat
+    policy: chat
     resources:
       requests:
         input:
@@ -29,6 +32,6 @@ endpoints:
           strategy: characters_div_4
         output:
           strategy: random
-          range: [50, 500]
+          range: [40, 60]
     timing:
       base_ms: [0, 0]

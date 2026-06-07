@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import random
 import time
 from dataclasses import dataclass
@@ -23,9 +22,19 @@ from mocklimit.ratelimit import (
     FixedWindowLimiter,
     LimitResult,
     SlidingWindowLimiter,
+    TokenBucketLimiter,
 )
 
-from .config import EndpointConfig, PolicyConfig, RateLimitConfig, load_config
+from .config import (
+    ComponentConfig,
+    ComponentStrategy,
+    EndpointConfig,
+    PolicyConfig,
+    RateLimitConfig,
+    load_config,
+)
+from .error_templates import ErrorContext, render_error_body
+from .formatters import format_reset, format_retry_after
 from .metrics import MetricsTracker
 from .stats import StatsTracker
 
@@ -44,7 +53,6 @@ class _RouteContext:
     ep_cfg: EndpointConfig
     policy: PolicyConfig
     limiter: CompositeLimit
-    costs: dict[str, int]
     stats: StatsTracker
     metrics: MetricsTracker
 
@@ -79,24 +87,41 @@ def _most_restrictive(result: CompositeLimitResult) -> LimitResult:
 
 
 def _rate_limit_headers(
-    lr: LimitResult,
-    headers_cfg: PolicyConfig,
+    result: CompositeLimitResult,
+    policy: PolicyConfig,
 ) -> dict[str, str]:
-    """Build rate-limit response headers from a ``LimitResult``."""
-    hdr = headers_cfg.headers
-    out: dict[str, str] = {
-        hdr.limit: str(lr.limit),
-        hdr.remaining: str(lr.remaining),
-        hdr.reset: f"{lr.reset_after_seconds:.1f}s",
-    }
-    if not lr.allowed:
-        out["Retry-After"] = str(math.ceil(lr.retry_after_seconds))
-    logger.trace(
-        "Built rate-limit headers: limit={} remaining={} reset={:.1f}s",
-        lr.limit,
-        lr.remaining,
-        lr.reset_after_seconds,
-    )
+    """Build rate-limit response headers from all per-limit results.
+
+    Emits one header group per limit that has a ``headers`` config.
+    Falls back to policy-level headers with the most-restrictive result.
+    """
+    fmt = policy.format
+    out: dict[str, str] = {}
+
+    has_per_limit_headers = False
+    for i, lc in enumerate(policy.limits):
+        if lc.headers is None:
+            continue
+        has_per_limit_headers = True
+        lr = result.per_limit.get(f"limit_{i}")
+        if lr is None:
+            continue
+        out[lc.headers.limit] = str(lr.limit)
+        out[lc.headers.remaining] = str(lr.remaining)
+        out[lc.headers.reset] = format_reset(lr.reset_after_seconds, fmt.reset)
+
+    if not has_per_limit_headers and policy.headers is not None:
+        lr = _most_restrictive(result)
+        hdr = policy.headers
+        out[hdr.limit] = str(lr.limit)
+        out[hdr.remaining] = str(lr.remaining)
+        out[hdr.reset] = format_reset(lr.reset_after_seconds, fmt.reset)
+
+    if not result.allowed:
+        lr = _most_restrictive(result)
+        header_name, header_value = format_retry_after(lr.retry_after_seconds, fmt)
+        out[header_name] = header_value
+
     return out
 
 
@@ -104,20 +129,34 @@ def _build_limiters(config: RateLimitConfig) -> dict[str, CompositeLimit]:
     """Instantiate a ``CompositeLimit`` for every policy in *config*."""
     limiters: dict[str, CompositeLimit] = {}
     for name, policy in config.policies.items():
-        if policy.strategy == "sliding_window":
-            limiter_cls = SlidingWindowLimiter
-        else:
-            limiter_cls = FixedWindowLimiter
-        pairs = [
-            (
-                f"limit_{i}",
-                limiter_cls(
-                    max_requests=lc.max_requests,
-                    window_seconds=lc.window_seconds,
-                ),
-            )
-            for i, lc in enumerate(policy.limits)
-        ]
+        pairs: list[tuple[str, Any]] = []
+        for i, lc in enumerate(policy.limits):
+            if policy.strategy == "token_bucket" or lc.capacity is not None:
+                pairs.append((
+                    f"limit_{i}",
+                    TokenBucketLimiter(
+                        capacity=lc.capacity or lc.limit or 0,
+                        refill_rate=lc.refill_rate or (
+                            (lc.limit or 0) / (lc.window_seconds or 60)
+                        ),
+                    ),
+                ))
+            elif policy.strategy == "sliding_window":
+                pairs.append((
+                    f"limit_{i}",
+                    SlidingWindowLimiter(
+                        max_requests=lc.limit or 0,
+                        window_seconds=lc.window_seconds or 60,
+                    ),
+                ))
+            else:
+                pairs.append((
+                    f"limit_{i}",
+                    FixedWindowLimiter(
+                        max_requests=lc.limit or 0,
+                        window_seconds=lc.window_seconds or 60,
+                    ),
+                ))
         limiters[name] = CompositeLimit(pairs)
         logger.debug(
             "Built limiter for policy '{}': strategy={}, {} limit(s), scope={}",
@@ -148,37 +187,81 @@ def _build_route_table(
     return table
 
 
-async def _estimate_tokens(
+def _evaluate_component(body: bytes, comp: ComponentConfig) -> int:
+    """Evaluate a single input/output component to produce a cost value."""
+    match comp.strategy:
+        case ComponentStrategy.fixed:
+            return comp.value if comp.value is not None else 1
+        case ComponentStrategy.random:
+            r = comp.range or (1, 1)
+            return _RNG.randint(r[0], r[1])
+        case ComponentStrategy.characters_div_4:
+            return len(body) // 4
+
+
+async def _estimate_resources(
     request: Request,
     ep_cfg: EndpointConfig,
-) -> dict[str, int]:
-    """Compute estimated token usage for a request."""
-    te = ep_cfg.token_estimation
-    if te is None:
-        return {}
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Compute per-resource estimated values for a request.
+
+    Returns (totals, inputs, outputs):
+    - totals[name] = input + output
+    - inputs[name] = just the input component
+    - outputs[name] = just the output component
+    """
+    if not ep_cfg.resources:
+        return {}, {}, {}
+
     body = await request.body()
-    prompt_tokens = len(body) // 4
-    completion_tokens = _RNG.randint(te.output[0], te.output[1])
-    usage = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }
-    logger.debug(
-        "Token estimation: prompt={} completion={} total={}",
-        prompt_tokens,
-        completion_tokens,
-        usage["total_tokens"],
-    )
-    return usage
+    totals: dict[str, int] = {}
+    inputs: dict[str, int] = {}
+    outputs: dict[str, int] = {}
+    for name, cfg in ep_cfg.resources.items():
+        input_val = _evaluate_component(body, cfg.input)
+        output_val = _evaluate_component(body, cfg.output)
+        totals[name] = input_val + output_val
+        inputs[name] = input_val
+        outputs[name] = output_val
+        logger.debug(
+            "Resource estimation: {}={} (in={}, out={})",
+            name, totals[name], input_val, output_val,
+        )
+
+    return totals, inputs, outputs
+
+
+def _resolve_costs(
+    policy: PolicyConfig,
+    totals: dict[str, int],
+    inputs: dict[str, int],
+    outputs: dict[str, int],
+) -> dict[str, int]:
+    """Build per-limiter cost dict from the policy's limit configs.
+
+    Supports dotted dimensions: ``tokens.input``, ``tokens.output``.
+    Plain dimension names use the total (input + output).
+    Falls back to 1 if the resource is missing or zero.
+    """
+    costs: dict[str, int] = {}
+    for i, lc in enumerate(policy.limits):
+        dim = lc.dimension
+        if "." in dim:
+            resource, component = dim.split(".", 1)
+            if component == "input":
+                val = inputs.get(resource)
+            elif component == "output":
+                val = outputs.get(resource)
+            else:
+                val = totals.get(resource)
+        else:
+            val = totals.get(dim)
+        costs[f"limit_{i}"] = val if val is not None and val > 0 else 1
+    return costs
 
 
 def _extract_base_path(spec_path: str) -> str:
-    """Read the first ``servers[].url`` from the spec and return its path.
-
-    For example ``https://api.openai.com/v1`` yields ``/v1``.
-    Returns an empty string when no server URL is defined.
-    """
+    """Read the first ``servers[].url`` from the spec and return its path."""
     raw = Path(spec_path).read_text(encoding="utf-8")
     spec: dict[str, Any] = yaml.safe_load(raw)
     servers: list[dict[str, Any]] = spec.get("servers", [])
@@ -192,13 +275,7 @@ def _extract_base_path(spec_path: str) -> str:
 
 
 def create_app(spec_path: str, rate_config_path: str) -> FastAPI:
-    """Build a fully-wired FastAPI application.
-
-    Parses the OpenAPI *spec_path* for route definitions and dummy
-    responses, reads the rate-limit YAML at *rate_config_path*, and
-    registers all routes under the spec's server base path (e.g.
-    ``/v1``) with the appropriate rate-limiting behaviour.
-    """
+    """Build a fully-wired FastAPI application."""
     logger.info(
         "Creating mocklimit app from spec='{}' config='{}'",
         spec_path,
@@ -233,7 +310,6 @@ def create_app(spec_path: str, rate_config_path: str) -> FastAPI:
                 ep_cfg=ep_cfg,
                 policy=policy,
                 limiter=limiters[ep_cfg.policy],
-                costs={f"limit_{i}": 1 for i in range(len(policy.limits))},
                 stats=stats,
                 metrics=metrics,
             )
@@ -254,11 +330,9 @@ def create_app(spec_path: str, rate_config_path: str) -> FastAPI:
     app.include_router(router)
 
     async def get_stats(_request: Request) -> JSONResponse:
-        """Return per-endpoint, per-key request statistics."""
         return JSONResponse(content=stats.snapshot())
 
     async def get_routes(_request: Request) -> JSONResponse:
-        """Return the list of registered routes and their policies."""
         return JSONResponse(content=route_table)
 
     app.add_api_route("/mocklimit/stats", get_stats, methods=["GET"])
@@ -288,9 +362,12 @@ def _register_limited_route(
         scope_key = _extract_scope_key(request, ctx.policy)
         ctx.stats.record_request(ctx.route_key, scope_key)
 
-        result = ctx.limiter.check(scope_key, ctx.costs)
+        totals, inputs, outputs = await _estimate_resources(request, ctx.ep_cfg)
+        costs = _resolve_costs(ctx.policy, totals, inputs, outputs)
+
+        result = ctx.limiter.check(scope_key, costs)
         lr = _most_restrictive(result)
-        headers = _rate_limit_headers(lr, ctx.policy)
+        headers = _rate_limit_headers(result, ctx.policy)
 
         if not result.allowed:
             ctx.stats.record_limited(ctx.route_key, scope_key)
@@ -305,33 +382,66 @@ def _register_limited_route(
                 policy=ctx.ep_cfg.policy,
             )
             logger.info(
-                "{} {} -> 429 (denied_by={}, remaining={}) [{:.1f}ms]",
+                "{} {} -> 429 (denied_by={}, remaining={}, costs={}) [{:.1f}ms]",
                 request.method,
                 request.url.path,
                 result.denied_by,
                 lr.remaining,
+                costs,
                 duration * 1000,
             )
+
+            if ctx.policy.error_template:
+                denied_idx = (
+                    int(result.denied_by.split("_")[1])
+                    if result.denied_by
+                    else 0
+                )
+                denied_limit = ctx.policy.limits[denied_idx]
+                error_body = render_error_body(ErrorContext(
+                    provider=ctx.policy.error_template.provider,
+                    denied_by_limit=denied_limit,
+                    limit=lr.limit,
+                    reset_seconds=lr.reset_after_seconds,
+                    retry_seconds=lr.retry_after_seconds,
+                    fmt=ctx.policy.format,
+                ))
+                return JSONResponse(
+                    status_code=429,
+                    content=error_body,
+                    headers=headers,
+                )
+
             return JSONResponse(
                 status_code=429,
                 content=ctx.dummy_body,
                 headers=headers,
             )
 
-        latency_min, latency_max = ctx.policy.response_latency_ms
-        if latency_max > 0:
-            delay_s = _RNG.uniform(latency_min / 1000, latency_max / 1000)
+        latency_min, latency_max = (0, 0)
+        if ctx.ep_cfg.timing:
+            latency_min, latency_max = ctx.ep_cfg.timing.base_ms
+        elif ctx.policy.response_latency_ms != (0, 0):
+            latency_min, latency_max = ctx.policy.response_latency_ms
+
+        delay_ms = _RNG.uniform(latency_min, latency_max) if latency_max > 0 else 0.0
+
+        if ctx.ep_cfg.timing and ctx.ep_cfg.timing.scale:
+            sc = ctx.ep_cfg.timing.scale
+            output_val = outputs.get(sc.resource, 0)
+            delay_ms += output_val * sc.ms_per_unit
+
+        if delay_ms > 0:
             logger.debug(
                 "Simulating {:.0f}ms response latency for {}",
-                delay_s * 1000,
+                delay_ms,
                 ctx.route_key,
             )
-            await asyncio.sleep(delay_s)
+            await asyncio.sleep(delay_ms / 1000)
 
         body: dict[str, Any] = dict(ctx.dummy_body)
-        usage = await _estimate_tokens(request, ctx.ep_cfg)
-        if usage:
-            body["usage"] = usage
+        if totals:
+            body["usage"] = totals
 
         duration = time.monotonic() - start
         ctx.metrics.observe_request(
@@ -344,10 +454,11 @@ def _register_limited_route(
             policy=ctx.ep_cfg.policy,
         )
         logger.info(
-            "{} {} -> 200 (remaining={}) [{:.1f}ms]",
+            "{} {} -> 200 (remaining={}, costs={}) [{:.1f}ms]",
             request.method,
             request.url.path,
             lr.remaining,
+            costs,
             duration * 1000,
         )
         return JSONResponse(content=body, headers=headers)

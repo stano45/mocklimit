@@ -1,0 +1,53 @@
+# OpenAI rate-limit simulation.
+# Fixed window, combined TPM (input+output), Go-style duration reset,
+# retry-after-ms header, separate request/token header groups.
+policies:
+  chat:
+    strategy: fixed_window
+    limits:
+      - dimension: requests
+        limit: 60
+        window_seconds: 60
+        headers:
+          limit: x-ratelimit-limit-requests
+          remaining: x-ratelimit-remaining-requests
+          reset: x-ratelimit-reset-requests
+      - dimension: tokens
+        limit: 150000
+        window_seconds: 60
+        headers:
+          limit: x-ratelimit-limit-tokens
+          remaining: x-ratelimit-remaining-tokens
+          reset: x-ratelimit-reset-tokens
+    scope: api_key
+    format:
+      reset: go_duration
+      retry_after:
+        header: retry-after-ms
+        unit: milliseconds
+    error_template:
+      provider: openai
+endpoints:
+  /chat/completions:
+    methods: [POST]
+    policy: chat
+    resources:
+      requests:
+        input:
+          strategy: fixed
+          value: 1
+        output:
+          strategy: fixed
+          value: 0
+      tokens:
+        input:
+          strategy: characters_div_4
+        output:
+          strategy: random
+          range: [50, 500]
+    timing:
+      base_ms: [20, 100]
+      scale:
+        resource: tokens
+        component: output
+        ms_per_unit: 0.02

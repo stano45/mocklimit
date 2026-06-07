@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -229,11 +230,11 @@ class TestPrefixMounting:
         assert resp.status_code == 404
 
 
-class TestTokenEstimation:
-    """Token estimation adds a ``usage`` field to the response."""
+class TestResourceEstimation:
+    """Resource estimation adds a ``usage`` field to the response."""
 
     def test_usage_field_present(self, app_client: TestClient) -> None:
-        """POST /v1/chat/completions includes prompt and completion token counts."""
+        """POST /v1/chat/completions includes resource estimations."""
         resp = app_client.post(
             "/v1/chat/completions",
             json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
@@ -243,11 +244,10 @@ class TestTokenEstimation:
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
         usage = body["usage"]
-        assert "prompt_tokens" in usage
-        assert "completion_tokens" in usage
-        assert "total_tokens" in usage
-        expected = usage["prompt_tokens"] + usage["completion_tokens"]
-        assert usage["total_tokens"] == expected
+        assert "requests" in usage
+        assert usage["requests"] == 1
+        assert "tokens" in usage
+        assert usage["tokens"] > 0
 
 
 class TestOpenAISDKIntegration:
@@ -383,3 +383,196 @@ class TestSlidingWindowIndependentKeys:
             headers=_auth_header("sw-ind-b"),
         )
         assert allowed.status_code == 200
+
+
+# --- Multi-resource and timing tests ---
+
+_MULTI_CONFIGS = Path(__file__).parent / "configs"
+
+
+@pytest.fixture
+def multi_client() -> TestClient:
+    """Client wired to RPM+TPM dual-limit config with timing."""
+    app = create_app(
+        spec_path=str(_OPENAPI_FIXTURES / "openai_subset.yaml"),
+        rate_config_path=str(_MULTI_CONFIGS / "rpm_tpm_limits.yaml"),
+    )
+    return TestClient(app)
+
+
+@pytest.fixture
+def rpm_only_client() -> TestClient:
+    """Client with high TPM so only RPM fires."""
+    app = create_app(
+        spec_path=str(_OPENAPI_FIXTURES / "openai_subset.yaml"),
+        rate_config_path=str(_MULTI_CONFIGS / "rpm_only.yaml"),
+    )
+    return TestClient(app)
+
+
+class TestMultiResourceEnforcement:
+    """Dual RPM + TPM enforcement."""
+
+    def test_tpm_exhaustion_before_rpm(self, multi_client: TestClient) -> None:
+        """TPM budget (500) exhausts before RPM (10) with large requests."""
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "x" * 400}],
+        }
+        statuses: list[int] = []
+        for _ in range(10):
+            resp = multi_client.post(
+                "/v1/chat/completions",
+                json=body,
+                headers=_auth_header("tpm-key"),
+            )
+            statuses.append(resp.status_code)
+
+        n200 = statuses.count(200)
+        n429 = statuses.count(429)
+        assert n200 < 10, "Should hit TPM before exhausting RPM"
+        assert n429 > 0, "Some requests must be rejected"
+        assert n200 >= 2, "At least 2 requests fit in 500 token budget"
+
+    def test_rpm_exhaustion_with_small_requests(
+        self, rpm_only_client: TestClient,
+    ) -> None:
+        """With high TPM, RPM (5) is the binding constraint."""
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        statuses: list[int] = []
+        for _ in range(7):
+            resp = rpm_only_client.post(
+                "/v1/chat/completions",
+                json=body,
+                headers=_auth_header("rpm-key"),
+            )
+            statuses.append(resp.status_code)
+
+        n200 = statuses.count(200)
+        assert n200 == 5, f"RPM limit is 5, got {n200} successes"
+        assert statuses[5] == 429
+        assert statuses[6] == 429
+
+    def test_usage_reflects_resource_values(self, multi_client: TestClient) -> None:
+        """Response body includes estimated resource usage."""
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hello world"}],
+        }
+        resp = multi_client.post(
+            "/v1/chat/completions",
+            json=body,
+            headers=_auth_header("usage-key"),
+        )
+        assert resp.status_code == 200
+        usage = resp.json()["usage"]
+        assert usage["requests"] == 1
+        assert 40 <= usage["tokens"] <= 100  # input (chars/4) + output (40-60)
+
+    def test_independent_keys_separate_budgets(self, multi_client: TestClient) -> None:
+        """Different API keys have independent resource budgets."""
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "x" * 400}],
+        }
+        for _ in range(8):
+            multi_client.post(
+                "/v1/chat/completions",
+                json=body,
+                headers=_auth_header("key-alpha"),
+            )
+
+        resp = multi_client.post(
+            "/v1/chat/completions",
+            json=body,
+            headers=_auth_header("key-beta"),
+        )
+        assert resp.status_code == 200
+
+    def test_characters_div_4_strategy(self, multi_client: TestClient) -> None:
+        """Input token estimation uses len(body)//4."""
+        body_str = "x" * 800
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": body_str}],
+        }
+        resp = multi_client.post(
+            "/v1/chat/completions",
+            json=body,
+            headers=_auth_header("char-key"),
+        )
+        assert resp.status_code == 200
+        usage = resp.json()["usage"]
+        assert usage["tokens"] >= 200  # input alone should be >= 200 (800+ chars / 4)
+
+    def test_fixed_strategy_requests_always_one(self, multi_client: TestClient) -> None:
+        """The 'requests' resource uses fixed strategy = 1 per request."""
+        resp = multi_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]},
+            headers=_auth_header("fixed-key"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["usage"]["requests"] == 1
+
+
+class TestTimingScaling:
+    """Response latency scaling based on resource output."""
+
+    def test_timing_adds_latency(self, multi_client: TestClient) -> None:
+        """Requests take longer due to base_ms + output-scaled delay."""
+        start = time.monotonic()
+        resp = multi_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
+            headers=_auth_header("timing-key"),
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert resp.status_code == 200
+        # base_ms: [10, 20] + output(40-60) * 0.5ms = 20-30ms extra
+        # Total expected: 30-50ms minimum
+        assert elapsed_ms >= 25, f"Expected >=25ms latency, got {elapsed_ms:.1f}ms"
+
+    def test_timing_scales_with_output(self, multi_client: TestClient) -> None:
+        """Larger output values produce longer latency."""
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "test"}],
+        }
+        times: list[float] = []
+        for _ in range(5):
+            start = time.monotonic()
+            multi_client.post(
+                "/v1/chat/completions",
+                json=body,
+                headers=_auth_header(f"scale-key-{_}"),
+            )
+            times.append((time.monotonic() - start) * 1000)
+
+        avg_ms = sum(times) / len(times)
+        # base [10,20] + output[40,60]*0.5 = [30,50]ms average
+        assert avg_ms >= 25, f"Average latency {avg_ms:.1f}ms too low"
+        assert avg_ms < 200, f"Average latency {avg_ms:.1f}ms unexpectedly high"
+
+    def test_no_timing_falls_back_to_policy(self) -> None:
+        """Without endpoint timing, policy response_latency_ms is used."""
+        app = create_app(
+            spec_path=str(_OPENAPI_FIXTURES / "openai_subset.yaml"),
+            rate_config_path=str(_FIXTURES / "rate_config.yaml"),
+        )
+        client = TestClient(app)
+
+        start = time.monotonic()
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+            headers=_auth_header("fallback-key"),
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+        assert resp.status_code == 200
+        # Policy has response_latency_ms: [0, 0] and timing base_ms [0,0]
+        assert elapsed_ms < 500, "Should have near-zero latency"

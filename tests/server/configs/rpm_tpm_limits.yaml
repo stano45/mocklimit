@@ -1,21 +1,24 @@
+# Test config: RPM + TPM dual enforcement with timing scaling.
+# 10 requests per 10s AND 500 tokens per 10s.
 policies:
-  openai_chat:
+  chat:
     strategy: fixed_window
     limits:
       - dimension: requests
-        limit: 5
-        window_seconds: 60
+        limit: 10
+        window_seconds: 10
+      - dimension: tokens
+        limit: 500
+        window_seconds: 10
     scope: api_key
-    response_latency_ms: [0, 0]
     headers:
       limit: x-ratelimit-limit-requests
       remaining: x-ratelimit-remaining-requests
       reset: x-ratelimit-reset-requests
-
 endpoints:
   /chat/completions:
     methods: [POST]
-    policy: openai_chat
+    policy: chat
     resources:
       requests:
         input:
@@ -29,6 +32,10 @@ endpoints:
           strategy: characters_div_4
         output:
           strategy: random
-          range: [50, 500]
+          range: [40, 60]
     timing:
-      base_ms: [0, 0]
+      base_ms: [10, 20]
+      scale:
+        resource: tokens
+        component: output
+        ms_per_unit: 0.5

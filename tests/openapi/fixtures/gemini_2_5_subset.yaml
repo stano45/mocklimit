@@ -1,0 +1,65 @@
+openapi: "3.0.0"
+info:
+  title: Gemini 2.5 Pro (mock)
+  version: "1.0"
+servers:
+  - url: /v1beta
+paths:
+  /models/gemini-2.5-pro:generateContent:
+    post:
+      operationId: generateContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateContentRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateContentResponse"
+components:
+  schemas:
+    GenerateContentRequest:
+      type: object
+      properties:
+        contents:
+          type: array
+          items:
+            type: object
+            properties:
+              parts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    text:
+                      type: string
+    GenerateContentResponse:
+      type: object
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              content:
+                type: object
+                properties:
+                  parts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        text:
+                          type: string
+                          example: "The meaning of life is a philosophical question."
+                  role:
+                    type: string
+                    example: "model"
+              finishReason:
+                type: string
+                example: "STOP"

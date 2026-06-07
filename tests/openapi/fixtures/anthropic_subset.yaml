@@ -1,0 +1,71 @@
+openapi: "3.0.0"
+info:
+  title: Anthropic API (mock)
+  version: "2024-01-01"
+servers:
+  - url: /v1
+paths:
+  /messages:
+    post:
+      operationId: createMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+components:
+  schemas:
+    MessageRequest:
+      type: object
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+              content:
+                type: string
+        max_tokens:
+          type: integer
+      required: [model, messages, max_tokens]
+    MessageResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "msg_01XFDUDYJgAACzvnptvVoYEL"
+        type:
+          type: string
+          example: "message"
+        role:
+          type: string
+          example: "assistant"
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                example: "text"
+              text:
+                type: string
+                example: "Hello! How can I help you today?"
+        model:
+          type: string
+          example: "claude-sonnet-4-20250514"
+        stop_reason:
+          type: string
+          example: "end_turn"

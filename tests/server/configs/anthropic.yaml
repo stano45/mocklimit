@@ -1,0 +1,60 @@
+# Anthropic Claude rate-limit simulation.
+# Token bucket with continuous refill, separate ITPM/OTPM buckets,
+# RFC 3339 reset timestamps, per-dimension headers.
+policies:
+  claude:
+    strategy: token_bucket
+    limits:
+      - dimension: requests
+        capacity: 60
+        refill_rate: 1
+        headers:
+          limit: anthropic-ratelimit-requests-limit
+          remaining: anthropic-ratelimit-requests-remaining
+          reset: anthropic-ratelimit-requests-reset
+      - dimension: tokens.input
+        capacity: 80000
+        refill_rate: 1333
+        headers:
+          limit: anthropic-ratelimit-input-tokens-limit
+          remaining: anthropic-ratelimit-input-tokens-remaining
+          reset: anthropic-ratelimit-input-tokens-reset
+      - dimension: tokens.output
+        capacity: 16000
+        refill_rate: 266
+        headers:
+          limit: anthropic-ratelimit-output-tokens-limit
+          remaining: anthropic-ratelimit-output-tokens-remaining
+          reset: anthropic-ratelimit-output-tokens-reset
+    scope: api_key
+    format:
+      reset: rfc3339
+      retry_after:
+        header: retry-after
+        unit: seconds
+    error_template:
+      provider: anthropic
+endpoints:
+  /messages:
+    methods: [POST]
+    policy: claude
+    resources:
+      requests:
+        input:
+          strategy: fixed
+          value: 1
+        output:
+          strategy: fixed
+          value: 0
+      tokens:
+        input:
+          strategy: characters_div_4
+        output:
+          strategy: random
+          range: [100, 2000]
+    timing:
+      base_ms: [50, 200]
+      scale:
+        resource: tokens
+        component: output
+        ms_per_unit: 0.03

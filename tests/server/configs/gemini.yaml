@@ -1,0 +1,45 @@
+# Google Gemini rate-limit simulation.
+# Fixed window, input-only TPM, no rate-limit headers on success,
+# error body in Google QuotaFailure format.
+policies:
+  generate:
+    strategy: fixed_window
+    limits:
+      - dimension: requests
+        limit: 15
+        window_seconds: 60
+      - dimension: tokens.input
+        limit: 32000
+        window_seconds: 60
+    scope: api_key
+    format:
+      reset: relative_seconds
+      retry_after:
+        header: retry-after
+        unit: seconds
+    error_template:
+      provider: google
+endpoints:
+  /models/gemini-2.5-pro:generateContent:
+    methods: [POST]
+    policy: generate
+    resources:
+      requests:
+        input:
+          strategy: fixed
+          value: 1
+        output:
+          strategy: fixed
+          value: 0
+      tokens:
+        input:
+          strategy: characters_div_4
+        output:
+          strategy: random
+          range: [200, 4000]
+    timing:
+      base_ms: [100, 500]
+      scale:
+        resource: tokens
+        component: output
+        ms_per_unit: 0.04
