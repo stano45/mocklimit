@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import yaml
@@ -187,16 +188,44 @@ def _build_route_table(
     return table
 
 
+def _body_int_field(body: bytes, field: str) -> int | None:
+    """Read a top-level integer field from a JSON request body, or None."""
+    try:
+        parsed: object = json.loads(body)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    data = cast("dict[str, Any]", parsed)
+    val: Any = data.get(field)
+    if isinstance(val, bool):  # bool is an int subclass — reject it
+        return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    return None
+
+
 def _evaluate_component(body: bytes, comp: ComponentConfig) -> int:
-    """Evaluate a single input/output component to produce a cost value."""
+    """Evaluate a single input/output component to produce a cost value.
+
+    A ``cap_field`` (e.g. ``max_tokens``) clamps the result to the requested
+    cap so simulated output never exceeds the caller's limit, matching real
+    LLM completion-token accounting.
+    """
+    value = 1
     match comp.strategy:
         case ComponentStrategy.fixed:
-            return comp.value if comp.value is not None else 1
+            value = comp.value if comp.value is not None else 1
         case ComponentStrategy.random:
             r = comp.range or (1, 1)
-            return _RNG.randint(r[0], r[1])
+            value = _RNG.randint(r[0], r[1])
         case ComponentStrategy.characters_div_4:
-            return len(body) // 4
+            value = len(body) // 4
+    if comp.cap_field is not None:
+        cap = _body_int_field(body, comp.cap_field)
+        if cap is not None:
+            value = min(value, max(0, cap))
+    return value
 
 
 async def _estimate_resources(

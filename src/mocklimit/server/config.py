@@ -62,11 +62,19 @@ class ComponentConfig(BaseModel):
     - ``fixed``: always returns ``value``.
     - ``random``: uniform random integer in ``range``.
     - ``characters_div_4``: ``len(request_body) // 4``.
+
+    ``cap_field`` (optional): name of a top-level integer field in the JSON
+    request body that caps the computed value (e.g. ``max_tokens``). Real LLM
+    APIs never emit more completion tokens than the caller's ``max_tokens``, so
+    setting ``cap_field: max_tokens`` on a ``random`` output component clamps the
+    drawn completion length to the requested cap when the field is present. When
+    the field is absent or unparseable, the uncapped value is used.
     """
 
     strategy: ComponentStrategy
     value: int | None = None
     range: tuple[int, int] | None = None
+    cap_field: str | None = None
 
 
 class ResourceConfig(BaseModel):
